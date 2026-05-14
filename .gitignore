@@ -1,0 +1,5 @@
+.env
+dataset/
+test_functionality/
+__pycache__/
+*.pyc
