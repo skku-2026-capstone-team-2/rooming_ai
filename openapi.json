@@ -107,12 +107,12 @@
             "description": "선호 조건 레이블 목록",
             "default": []
           },
-          "user_places": {
+          "target_place": {
             "items": {
               "$ref": "#/components/schemas/UserPlace"
             },
             "type": "array",
-            "title": "User Places",
+            "title": "Target Place",
             "description": "자주 가는 장소 목록",
             "default": []
           },
