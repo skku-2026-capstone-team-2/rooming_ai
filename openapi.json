@@ -1,0 +1,240 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Rooming AI 서버",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/recommend": {
+      "post": {
+        "tags": [
+          "AI 추천"
+        ],
+        "summary": "Recommend",
+        "operationId": "recommend_recommend_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecommendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecommendResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "PropertyResult": {
+        "properties": {
+          "property_id": {
+            "type": "integer",
+            "title": "Property Id",
+            "description": "매물 PK"
+          },
+          "infra_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Infra Ids",
+            "description": "매물 주변 인프라 PK 목록",
+            "default": []
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation",
+            "description": "GPT 추천 설명"
+          }
+        },
+        "type": "object",
+        "required": [
+          "property_id",
+          "explanation"
+        ],
+        "title": "PropertyResult"
+      },
+      "RecommendRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "자연어 검색 쿼리"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preferences",
+            "description": "선호 조건 레이블 목록",
+            "default": []
+          },
+          "user_places": {
+            "items": {
+              "$ref": "#/components/schemas/UserPlace"
+            },
+            "type": "array",
+            "title": "User Places",
+            "description": "자주 가는 장소 목록",
+            "default": []
+          },
+          "top_n": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Top N",
+            "description": "추천 매물 수",
+            "default": 3
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "RecommendRequest"
+      },
+      "RecommendResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/PropertyResult"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "message",
+          "results"
+        ],
+        "title": "RecommendResponse"
+      },
+      "UserPlace": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "장소명"
+          },
+          "lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lat",
+            "description": "위도"
+          },
+          "lng": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lng",
+            "description": "경도"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "UserPlace"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}
