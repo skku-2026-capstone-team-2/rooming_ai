@@ -253,6 +253,7 @@ def score_infra(articles: list[dict], infra_keywords: list[str]) -> list[dict]:
     for a in articles:
         a["infra_score"] = 0.0
         a["infra_found"] = []
+        a["infra_ids"]   = []
 
     if not infra_keywords or not articles:
         return articles
@@ -267,6 +268,7 @@ def score_infra(articles: list[dict], infra_keywords: list[str]) -> list[dict]:
         cur.execute("""
             SELECT DISTINCT ON (a.property_id)
                 a.property_id AS article_id,
+                i.id          AS infra_id,
                 i.name        AS nearest_name,
                 ST_Distance(
                     ST_SetSRID(ST_MakePoint(a.longitude, a.latitude), 4326)::geography,
@@ -291,6 +293,7 @@ def score_infra(articles: list[dict], infra_keywords: list[str]) -> list[dict]:
             dist = float(row["min_dist_m"])
             id_map[aid]["infra_score"] += 1.0 - (dist / INFRA_RADIUS_M)
             id_map[aid]["infra_found"].append(f"{keyword}({row['nearest_name']}, {int(dist)}m)")
+            id_map[aid]["infra_ids"].append(row["infra_id"])
 
     cur.close()
     conn.close()

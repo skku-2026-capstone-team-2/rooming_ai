@@ -37,8 +37,9 @@ class RecommendRequest(BaseModel):
 # ── 응답 스키마 ──────────────────────────────────────────────────
 
 class PropertyResult(BaseModel):
-    property_id: int = Field(..., description="매물 PK")
-    explanation: str = Field(..., description="GPT 추천 설명")
+    property_id: int       = Field(..., description="매물 PK")
+    infra_ids:   list[int] = Field([], description="매물 주변 인프라 PK 목록")
+    explanation: str       = Field(..., description="GPT 추천 설명")
 
 
 class RecommendResponse(BaseModel):
@@ -76,7 +77,7 @@ def recommend(req: RecommendRequest):
         ))
 
     results = [
-        PropertyResult(property_id=a["id"], explanation=exp)
+        PropertyResult(property_id=a["id"], infra_ids=a.get("infra_ids", []), explanation=exp)
         for a, exp in zip(results_raw, explanations)
     ]
 
