@@ -69,13 +69,16 @@ def insert_infrastructures(places: list[dict], dong_name: str, keyword: str) -> 
             p.get("도로명주소"),
         ))
 
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
     conn = get_connection()
     cur  = conn.cursor()
     execute_values(cur, """
-        INSERT INTO infrastructures (name, category, location, road_address)
+        INSERT INTO infrastructures (name, category, location, road_address, created_at, updated_at)
         VALUES %s
         ON CONFLICT (name, category) DO NOTHING;
-    """, rows)
+    """, [(r[0], r[1], r[2], r[3], now, now) for r in rows])
 
     inserted = cur.rowcount
     conn.commit()
