@@ -30,7 +30,7 @@ class UserPlace(BaseModel):
 class RecommendRequest(BaseModel):
     query:       str            = Field(..., description="자연어 검색 쿼리")
     preferences: list[str]      = Field([], description="선호 조건 레이블 목록")
-    target_place: list[UserPlace] = Field([], description="자주 가는 장소 목록")
+    target_places: list[UserPlace] = Field([], description="자주 가는 장소 목록")
     top_n:       int            = Field(3, ge=1, le=5, description="추천 매물 수")
 
 
@@ -52,8 +52,8 @@ class RecommendResponse(BaseModel):
 
 @app.post("/recommend", response_model=RecommendResponse, tags=["AI 추천"])
 def recommend(req: RecommendRequest):
-    frequent_dicts = [{"name": p.name, "lat": p.lat, "lng": p.lng} for p in req.target_place]
-    frequent_names = [p.name for p in req.target_place]
+    frequent_dicts = [{"name": p.name, "lat": p.lat, "lng": p.lng} for p in req.target_places]
+    frequent_names = [p.name for p in req.target_places]
 
     results_raw: list[dict] = []
     error_msg: Optional[str] = None
