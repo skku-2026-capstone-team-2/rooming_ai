@@ -232,7 +232,7 @@ def filter_articles(parsed: dict) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────
-# Step 3. 인프라 근접 점수 (PostGIS)
+# Step 3. 인프라 근접 점수 
 # ──────────────────────────────────────────────────────────────
 
 INFRA_MAX_WALK_MIN    = 10   # 도보 10분 초과 시 점수 0
@@ -423,8 +423,8 @@ def score_embedding(articles: list[dict], soft_text: str, infra_keywords: list[s
 # ──────────────────────────────────────────────────────────────
 
 INFRA_MAX_PTS    = 40
-FREQUENT_MAX_PTS = 20
-EMBED_MAX_PTS    = 40
+FREQUENT_MAX_PTS = 40
+EMBED_MAX_PTS    = 20
 
 
 def rank_and_pick(articles: list[dict], top_n: int = 3) -> list[dict]:
