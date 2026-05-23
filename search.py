@@ -15,10 +15,8 @@ import json
 import re
 import math
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 from dotenv import load_dotenv
-from tmap import search_places, parse_place
 
 load_dotenv()
 
@@ -237,7 +235,8 @@ def filter_articles(parsed: dict) -> list[dict]:
 # Step 3. 인프라 근접 점수 (PostGIS)
 # ──────────────────────────────────────────────────────────────
 
-INFRA_RADIUS_M = 500
+INFRA_MAX_WALK_MIN    = 10   # 도보 10분 초과 시 점수 0
+FREQUENT_MAX_WALK_MIN = 30   # 도보 30분 초과 시 점수 0
 
 
 def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -247,6 +246,70 @@ def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dλ = math.radians(lng2 - lng1)
     a = math.sin(dφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(dλ / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _apply_infra_score(article: dict, keyword: str, infra_name: str,
+                       infra_id: int, walking_min: float) -> None:
+    if walking_min <= INFRA_MAX_WALK_MIN:
+        article["infra_score"] += 1.0 - (walking_min / INFRA_MAX_WALK_MIN)
+    article["infra_found"].append(f"{keyword}({infra_name}, {walking_min:.1f}분)")
+    if infra_id not in article["infra_ids"]:
+        article["infra_ids"].append(infra_id)
+
+
+def _fetch_and_save_infra(article: dict, keyword_en: str) -> tuple[int, str, float] | None:
+    """infra_accessibility 미존재 매물에 대해 Tmap POI + 도보시간 조회 후 DB 저장."""
+    from tmap import search_places, parse_place, get_walking_time
+    from psycopg2.extras import RealDictCursor
+    from datetime import datetime, timezone
+
+    alat, alng = article.get("lat"), article.get("lng")
+    if not alat or not alng:
+        return None
+
+    keyword_kr = INFRA_EN_TO_KR.get(keyword_en, keyword_en)
+    docs = search_places(TMAP_API_KEY, keyword_kr, alat, alng, radius=1000)
+    if not docs:
+        return None
+
+    nearest = min(docs, key=lambda d: d.get("_dist_m", 99999))
+    place   = parse_place(nearest)
+
+    try:
+        plat = float(place["위도"])
+        plng = float(place["경도"])
+    except (TypeError, ValueError):
+        return None
+
+    walking_min = get_walking_time(TMAP_API_KEY, alat, alng, plat, plng)
+    if walking_min is None:
+        return None
+
+    now  = datetime.now(timezone.utc)
+    conn = _get_conn()
+    cur  = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        INSERT INTO infrastructures (name, category, location, road_address, created_at, updated_at)
+        VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s, %s)
+        ON CONFLICT (name, category) DO UPDATE SET updated_at = EXCLUDED.updated_at
+        RETURNING id;
+    """, (place["이름"], keyword_en, plng, plat, place["도로명주소"], now, now))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return None
+    infra_id = row["id"]
+
+    cur.execute("""
+        INSERT INTO infra_accessibility (property_id, infrastructure_id, walking_time)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (property_id, infrastructure_id) DO NOTHING;
+    """, (article["id"], infra_id, walking_min))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return infra_id, place["이름"], walking_min
 
 
 def score_infra(articles: list[dict], infra_keywords: list[str]) -> list[dict]:
@@ -266,34 +329,32 @@ def score_infra(articles: list[dict], infra_keywords: list[str]) -> list[dict]:
 
     for keyword in infra_keywords:
         cur.execute("""
-            SELECT DISTINCT ON (a.property_id)
-                a.property_id AS article_id,
-                i.id          AS infra_id,
-                i.name        AS nearest_name,
-                ST_Distance(
-                    ST_SetSRID(ST_MakePoint(a.longitude, a.latitude), 4326)::geography,
-                    i.location
-                ) AS min_dist_m
-            FROM property a
-            JOIN infrastructures i
-                ON i.category = %s
-               AND ST_DWithin(
-                   ST_SetSRID(ST_MakePoint(a.longitude, a.latitude), 4326)::geography,
-                   i.location, %s
-               )
-            WHERE a.property_id = ANY(%s)
-            ORDER BY a.property_id, ST_Distance(
-                ST_SetSRID(ST_MakePoint(a.longitude, a.latitude), 4326)::geography,
-                i.location
-            );
-        """, (keyword, INFRA_RADIUS_M, article_ids))
+            SELECT DISTINCT ON (ia.property_id)
+                ia.property_id  AS article_id,
+                ia.walking_time,
+                i.id            AS infra_id,
+                i.name          AS infra_name
+            FROM infra_accessibility ia
+            JOIN infrastructures i ON i.id = ia.infrastructure_id
+            WHERE ia.property_id = ANY(%s)
+              AND i.category = %s
+            ORDER BY ia.property_id, ia.walking_time;
+        """, (article_ids, keyword))
 
+        found_ids = set()
         for row in cur.fetchall():
-            aid  = row["article_id"]
-            dist = float(row["min_dist_m"])
-            id_map[aid]["infra_score"] += 1.0 - (dist / INFRA_RADIUS_M)
-            id_map[aid]["infra_found"].append(f"{keyword}({row['nearest_name']}, {int(dist)}m)")
-            id_map[aid]["infra_ids"].append(row["infra_id"])
+            aid = row["article_id"]
+            found_ids.add(aid)
+            _apply_infra_score(id_map[aid], keyword, row["infra_name"],
+                               row["infra_id"], float(row["walking_time"]))
+
+        for aid in article_ids:
+            if aid in found_ids:
+                continue
+            result = _fetch_and_save_infra(id_map[aid], keyword)
+            if result:
+                infra_id, infra_name, walking_min = result
+                _apply_infra_score(id_map[aid], keyword, infra_name, infra_id, walking_min)
 
     cur.close()
     conn.close()
@@ -379,129 +440,98 @@ def rank_and_pick(articles: list[dict], top_n: int = 3) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────
-# Step 5. 자주 가는 장소 점수 (Tmap 지오코딩 + Haversine)
+# Step 5. 자주 가는 장소 점수 (routes 테이블 + Tmap fallback)
 # ──────────────────────────────────────────────────────────────
 
-FREQUENT_RADIUS_M = 3000
+def _apply_frequent_score(article: dict, place_name: str, duration_min: float) -> None:
+    if duration_min <= FREQUENT_MAX_WALK_MIN:
+        article["frequent_score"] += 1.0 - (duration_min / FREQUENT_MAX_WALK_MIN)
+    article["frequent_found"].append(f"{place_name}({duration_min:.1f}분)")
 
 
-def score_frequent(articles: list[dict], frequent_places: list[dict]) -> list[dict]:
+def _fetch_and_save_route(article: dict, user_place: dict) -> float | None:
+    """routes 미존재 쌍에 대해 Tmap 도보시간 계산 후 DB 저장."""
+    from tmap import get_walking_time
+
+    alat, alng = article.get("lat"), article.get("lng")
+    plat, plng = user_place.get("lat"), user_place.get("lng")
+    if not all([alat, alng, plat, plng]):
+        return None
+
+    dur = get_walking_time(TMAP_API_KEY, alat, alng, plat, plng)
+    if dur is None:
+        return None
+
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute("""
+        INSERT INTO routes (property_id, userplace_id, duration_minutes, transport_mode, updated_at)
+        VALUES (%s, %s, %s, 'pedestrian', NOW())
+        ON CONFLICT (property_id, userplace_id) DO NOTHING;
+    """, (article["id"], user_place["id"], dur))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return dur
+
+
+def score_frequent(articles: list[dict], seeker_id: int) -> tuple[list[dict], list[str]]:
     """
-    frequent_places 항목: {"name": str, "lat": float|None, "lng": float|None}
-    lat/lng 있으면 Tmap 지오코딩 생략.
+    seeker_id로 DB에서 user_places 조회 → routes 테이블 기반 점수 계산.
+    Returns: (articles, frequent_names)
     """
     for a in articles:
         a["frequent_score"] = 0.0
         a["frequent_found"] = []
 
-    if not frequent_places or not articles:
-        return articles
+    if not seeker_id or not articles:
+        return articles, []
 
-    lats = [a["lat"] for a in articles if a.get("lat")]
-    lngs = [a["lng"] for a in articles if a.get("lng")]
-    if not lats:
-        return articles
-    center_lat = sum(lats) / len(lats)
-    center_lng = sum(lngs) / len(lngs)
+    from db import get_user_places_for_seeker
+    from psycopg2.extras import RealDictCursor
 
-    place_coords: dict[str, tuple[float, float]] = {}
-    for place in frequent_places:
-        name = place["name"]
-        if place.get("lat") and place.get("lng"):
-            place_coords[name] = (place["lat"], place["lng"])
-            print(f"  [자주 가는 장소] '{name}' 좌표 직접 사용")
-        else:
-            docs = search_places(TMAP_API_KEY, name, center_lat, center_lng, radius=10000)
-            print(f"  [자주 가는 장소] '{name}' Tmap 결과: {len(docs)}개")
-            if docs:
-                p = parse_place(docs[0])
-                try:
-                    place_coords[name] = (float(p["위도"]), float(p["경도"]))
-                except (TypeError, ValueError) as e:
-                    print(f"  [자주 가는 장소] 좌표 파싱 실패: {e}")
+    user_places = get_user_places_for_seeker(seeker_id)
+    if not user_places:
+        return articles, []
 
-    if not place_coords:
-        print("  [자주 가는 장소] 좌표 확보 실패 → 점수 0")
-        return articles
-
-    n = len(place_coords)
-    for a in articles:
-        if not a.get("lat") or not a.get("lng"):
-            continue
-        total = 0.0
-        for name, (plat, plng) in place_coords.items():
-            dist = _haversine(a["lat"], a["lng"], plat, plng)
-            if dist <= FREQUENT_RADIUS_M:
-                score = 1.0 - (dist / FREQUENT_RADIUS_M)
-                a["frequent_found"].append(f"{name}({int(dist)}m)")
-            else:
-                score = 0.0
-            total += score
-        a["frequent_score"] = total / n
-
-    return articles
-
-
-# ──────────────────────────────────────────────────────────────
-# 인프라 수집 (DB에 없으면 Tmap → DB 저장)
-# ──────────────────────────────────────────────────────────────
-
-def _save_infra_to_db(places: list[dict], keyword_en: str) -> None:
-    try:
-        from db import insert_infrastructures
-        insert_infrastructures(places, "", keyword_en)
-    except Exception as e:
-        print(f"    → 인프라 DB 저장 실패: {e}")
-
-
-def _ensure_infra(infra_keywords: list[str], candidates: list[dict]) -> None:
-    """infra_keywords는 영어 코드 (gym, convenience_store, ...) 기준."""
-    if not infra_keywords or not candidates:
-        return
-
-    lats = [c["lat"] for c in candidates if c.get("lat")]
-    lngs = [c["lng"] for c in candidates if c.get("lng")]
-    if not lats:
-        return
-    center_lat = sum(lats) / len(lats)
-    center_lng = sum(lngs) / len(lngs)
+    article_ids   = [a["id"] for a in articles]
+    userplace_ids = [up["id"] for up in user_places]
+    id_map        = {a["id"]: a for a in articles}
+    up_map        = {up["id"]: up for up in user_places}
 
     conn = _get_conn()
-    cur  = conn.cursor()
-    missing = []
-    for keyword_en in infra_keywords:
-        cur.execute("""
-            SELECT 1 FROM infrastructures
-            WHERE category = %s
-              AND ST_DWithin(
-                  location,
-                  ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
-                  2000
-              )
-            LIMIT 1;
-        """, (keyword_en, center_lng, center_lat))
-        if cur.fetchone():
-            print(f"    '{keyword_en}' DB 확인")
-        else:
-            missing.append(keyword_en)
+    cur  = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT property_id, userplace_id, MIN(duration_minutes) AS duration_minutes
+        FROM routes
+        WHERE property_id = ANY(%s)
+          AND userplace_id = ANY(%s)
+        GROUP BY property_id, userplace_id;
+    """, (article_ids, userplace_ids))
+
+    found_pairs = set()
+    for row in cur.fetchall():
+        aid  = row["property_id"]
+        upid = row["userplace_id"]
+        found_pairs.add((aid, upid))
+        _apply_frequent_score(id_map[aid], up_map[upid]["name"], float(row["duration_minutes"]))
+
     cur.close()
     conn.close()
 
-    if not missing:
-        return
+    for aid in article_ids:
+        for upid in userplace_ids:
+            if (aid, upid) in found_pairs:
+                continue
+            dur = _fetch_and_save_route(id_map[aid], up_map[upid])
+            if dur is not None:
+                _apply_frequent_score(id_map[aid], up_map[upid]["name"], dur)
 
-    def _fetch_and_save(keyword_en: str) -> None:
-        keyword_kr = INFRA_EN_TO_KR.get(keyword_en, keyword_en)
-        docs   = search_places(TMAP_API_KEY, keyword_kr, center_lat, center_lng, radius=2000)
-        places = [parse_place(d) for d in docs]
-        if places:
-            _save_infra_to_db(places, keyword_en)
-            print(f"    '{keyword_en}' → {len(places)}건 수집 완료")
-        else:
-            print(f"    '{keyword_en}' 반경 2km 내 결과 없음")
+    n = len(user_places)
+    for a in articles:
+        a["frequent_score"] /= n
 
-    with ThreadPoolExecutor(max_workers=len(missing)) as executor:
-        list(executor.map(_fetch_and_save, missing))
+    return articles, [up["name"] for up in user_places]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -540,7 +570,10 @@ def explain_article(article: dict, query: str = "", frequent_places: list[str] |
             {"role": "system", "content": (
                 "당신은 친근하고 전문적인 부동산 컨설턴트입니다. "
                 "매물 정보를 바탕으로 이 매물의 특징, 생활 편의성, 장단점을 "
-                "자연스러운 한국어 줄글로 3~5문단 설명해주세요."
+                "자연스러운 한국어 줄글로 3~5문단 설명해주세요. "
+                "주변 인프라나 자주 가는 장소의 접근성을 언급할 때는 "
+                "구체적인 소요 시간(분)은 절대 쓰지 말고, "
+                "'도보 거리', '가까운', '멀지 않은', '편리하게 이용할 수 있는' 등의 표현을 사용하세요."
             )},
             {"role": "user", "content": user_msg},
         ],
@@ -553,17 +586,9 @@ def explain_article(article: dict, query: str = "", frequent_places: list[str] |
 # 메인 검색 파이프라인
 # ──────────────────────────────────────────────────────────────
 
-def search_stream(query: str, top_n: int = 3, frequent_places=None,
+def search_stream(query: str, top_n: int = 3, seeker_id: int | None = None,
                   selected_prefs: list[str] | None = None):
-    """
-    frequent_places: list[str] 또는 list[dict {"name", "lat"?, "lng"?}]
-    Yields: (step, status, message, data)
-    """
-    raw = frequent_places or []
-    frequent_places = [
-        p if isinstance(p, dict) else {"name": p, "lat": None, "lng": None}
-        for p in raw
-    ]
+    """Yields: (step, status, message, data)"""
 
     yield (1, "running", "자연어 파싱 중...", None)
     try:
@@ -582,19 +607,15 @@ def search_stream(query: str, top_n: int = 3, frequent_places=None,
     yield (2, "done", f"{len(candidates)}건 필터링됨", {"count": len(candidates)})
 
     infra = parsed.get("infra", [])
-    if infra:
-        yield (3, "running", "인프라 확인 / Tmap 수집 중...", None)
-        _ensure_infra(infra, candidates)
-        yield (3, "done", "인프라 확인 완료", None)
-
     yield (4, "running", "인프라 근접 점수 계산 중...", None)
     candidates = score_infra(candidates, infra)
     yield (4, "done", "완료", None)
 
-    if frequent_places:
-        yield (5, "running", f"자주 가는 장소 점수 계산 중... ({len(frequent_places)}곳)", None)
-        candidates = score_frequent(candidates, frequent_places)
-        yield (5, "done", "완료", None)
+    frequent_names: list[str] = []
+    if seeker_id:
+        yield (5, "running", "자주 가는 장소 점수 계산 중...", None)
+        candidates, frequent_names = score_frequent(candidates, seeker_id)
+        yield (5, "done", "완료", {"frequent_names": frequent_names})
 
     soft_text = parsed.get("soft", "")
     print(f"  [임베딩 쿼리] {soft_text!r}")

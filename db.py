@@ -43,6 +43,26 @@ def get_connection():
     )
 
 
+def get_user_places_for_seeker(seeker_id: int) -> list[dict]:
+    """매물 탐색자의 활성화된 자주 가는 장소 목록 반환. lat/lng 포함."""
+    from psycopg2.extras import RealDictCursor
+    conn = get_connection()
+    cur  = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT up.id, up.name, up.address, up.category,
+               ST_Y(up.location::geometry) AS lat,
+               ST_X(up.location::geometry) AS lng
+        FROM user_places up
+        JOIN seeker_user_places sup ON sup.userplace_id = up.id
+        WHERE sup.seeker_id = %s
+          AND sup.active = true;
+    """, (seeker_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
 def insert_infrastructures(places: list[dict], dong_name: str, keyword: str) -> int:
     """인프라 장소를 infrastructures 테이블에 삽입합니다. category는 영어로 저장."""
     if not places:

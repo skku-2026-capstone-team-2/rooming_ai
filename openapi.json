@@ -107,14 +107,17 @@
             "description": "선호 조건 레이블 목록",
             "default": []
           },
-          "target_places": {
-            "items": {
-              "$ref": "#/components/schemas/UserPlace"
-            },
-            "type": "array",
-            "title": "Target Places",
-            "description": "자주 가는 장소 목록",
-            "default": []
+          "seeker_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seeker Id",
+            "description": "매물 탐색자 ID (자주 가는 장소 조회용)"
           },
           "top_n": {
             "type": "integer",
@@ -156,44 +159,6 @@
           "results"
         ],
         "title": "RecommendResponse"
-      },
-      "UserPlace": {
-        "properties": {
-          "name": {
-            "type": "string",
-            "title": "Name",
-            "description": "장소명"
-          },
-          "lat": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Lat",
-            "description": "위도"
-          },
-          "lng": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Lng",
-            "description": "경도"
-          }
-        },
-        "type": "object",
-        "required": [
-          "name"
-        ],
-        "title": "UserPlace"
       },
       "ValidationError": {
         "properties": {

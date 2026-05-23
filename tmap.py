@@ -125,6 +125,40 @@ def search_places(api_key: str, keyword: str, lat: float, lng: float, radius: in
     return results
 
 
+TMAP_PEDESTRIAN_URL = "https://apis.openapi.sk.com/tmap/routes/pedestrian"
+
+
+def get_walking_time(api_key: str, start_lat: float, start_lng: float,
+                     end_lat: float, end_lng: float) -> float | None:
+    """두 좌표 간 Tmap 도보 시간(분) 반환. 실패 시 None."""
+    try:
+        resp = requests.post(
+            TMAP_PEDESTRIAN_URL,
+            params={"version": 1},
+            headers={"appKey": api_key, "Content-Type": "application/json"},
+            json={
+                "startX":       str(start_lng),
+                "startY":       str(start_lat),
+                "endX":         str(end_lng),
+                "endY":         str(end_lat),
+                "reqCoordType": "WGS84GEO",
+                "resCoordType": "WGS84GEO",
+                "startName":    "출발",
+                "endName":      "도착",
+            },
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return None
+        features = resp.json().get("features", [])
+        if not features:
+            return None
+        total_sec = features[0]["properties"].get("totalTime", 0)
+        return round(total_sec / 60, 1)
+    except Exception:
+        return None
+
+
 def parse_place(poi: dict) -> dict:
     """Tmap POI 결과를 표준 포맷으로 변환 (kakao.parse_place와 동일한 키 구조)."""
     new_addrs = poi.get("newAddressList", {}).get("newAddress", [])
