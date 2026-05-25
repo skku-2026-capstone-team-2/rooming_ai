@@ -268,6 +268,7 @@ def _fetch_and_save_infra(article: dict, keyword_en: str) -> tuple[int, str, flo
         return None
 
     keyword_kr = INFRA_EN_TO_KR.get(keyword_en, keyword_en)
+    category   = keyword_en if keyword_en in INFRA_EN_TO_KR else "ETC"
     docs = search_places(TMAP_API_KEY, keyword_kr, alat, alng, radius=1000)
     if not docs:
         return None
@@ -293,7 +294,7 @@ def _fetch_and_save_infra(article: dict, keyword_en: str) -> tuple[int, str, flo
         VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s, %s)
         ON CONFLICT (name, category) DO UPDATE SET updated_at = EXCLUDED.updated_at
         RETURNING id;
-    """, (place["이름"], keyword_en, plng, plat, place["도로명주소"], now, now))
+    """, (place["이름"], category, plng, plat, place["도로명주소"], now, now))
     row = cur.fetchone()
     if not row:
         cur.close(); conn.close()
