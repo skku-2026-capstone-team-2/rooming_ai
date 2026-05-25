@@ -9,14 +9,18 @@ load_dotenv()
 
 
 INFRA_KR_TO_EN: dict[str, str] = {
-    "헬스장": "gym",
-    "편의점": "convenience_store",
-    "카페":   "cafe",
-    "병원":   "hospital",
-    "약국":   "pharmacy",
-    "세탁소": "laundry",
-    "마트":   "mart",
-    "슈퍼":   "mart",
+    "헬스장": "GYM",
+    "편의점": "CONVENIENT_STORE",
+    "카페":   "CAFE",
+    "병원":   "HOSPITAL",
+    "약국":   "PHARMACY",
+    "세탁소": "LAUNDRY",
+    "마트":   "MART",
+    "슈퍼":   "MART",
+    "지하철역": "SUBWAY",
+    "은행":   "BANK",
+    "노래방": "KARAOKE",
+    "PC방":   "PC_ROOM",
 }
 
 

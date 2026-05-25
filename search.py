@@ -13,7 +13,6 @@ JSON 폴백 없음 — DB 연결 실패 시 예외를 그대로 올립니다.
 import os
 import json
 import re
-import math
 import numpy as np
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -47,23 +46,27 @@ PREF_HARD = {
 }
 
 PREF_INFRA = {
-    '편의점 가까움':    'convenience_store',
-    '마트/슈퍼 가까움': 'mart',
-    '카페 가까움':      'cafe',
-    '헬스장 가까움':    'gym',
-    '병원/약국 가까움': 'hospital',
-    '세탁소 가까움':    'laundry',
+    '편의점 가까움':    'CONVENIENT_STORE',
+    '마트/슈퍼 가까움': 'MART',
+    '카페 가까움':      'CAFE',
+    '헬스장 가까움':    'GYM',
+    '병원/약국 가까움': 'HOSPITAL',
+    '세탁소 가까움':    'LAUNDRY',
 }
 
 # Tmap 검색은 한국어 키워드 필요 — DB 영어 코드 → 한국어 변환
 INFRA_EN_TO_KR: dict[str, str] = {
-    "gym":               "헬스장",
-    "convenience_store": "편의점",
-    "cafe":              "카페",
-    "hospital":          "병원",
-    "pharmacy":          "약국",
-    "laundry":           "세탁소",
-    "mart":              "마트",
+    "GYM":              "헬스장",
+    "CONVENIENT_STORE": "편의점",
+    "CAFE":             "카페",
+    "HOSPITAL":         "병원",
+    "PHARMACY":         "약국",
+    "LAUNDRY":          "세탁소",
+    "MART":             "마트",
+    "SUBWAY":           "지하철역",
+    "BANK":             "은행",
+    "KARAOKE":          "노래방",
+    "PC_ROOM":          "PC방",
 }
 
 
@@ -123,13 +126,17 @@ PARSE_SYSTEM = """
 }
 
 infra 코드표 (반드시 아래 영어 코드만 사용):
-  헬스장/피트니스 → gym
-  편의점          → convenience_store
-  카페/커피숍     → cafe
-  병원/의원       → hospital
-  약국            → pharmacy
-  세탁소/코인워시 → laundry
-  마트/슈퍼       → mart
+  헬스장/피트니스 → GYM
+  편의점          → CONVENIENT_STORE
+  카페/커피숍     → CAFE
+  병원/의원       → HOSPITAL
+  약국            → PHARMACY
+  세탁소/코인워시 → LAUNDRY
+  마트/슈퍼       → MART
+  지하철역        → SUBWAY
+  은행            → BANK
+  노래방          → KARAOKE
+  PC방            → PC_ROOM
 
 변환 규칙:
 - 금액은 반드시 만원 단위 정수로 변환하세요. 절대 문자열로 출력하지 마세요.
@@ -239,13 +246,6 @@ INFRA_MAX_WALK_MIN    = 10   # 도보 10분 초과 시 점수 0
 FREQUENT_MAX_WALK_MIN = 30   # 도보 30분 초과 시 점수 0
 
 
-def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    R = 6_371_000
-    φ1, φ2 = math.radians(lat1), math.radians(lat2)
-    dφ = math.radians(lat2 - lat1)
-    dλ = math.radians(lng2 - lng1)
-    a = math.sin(dφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(dλ / 2) ** 2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def _apply_infra_score(article: dict, keyword: str, infra_name: str,
