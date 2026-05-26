@@ -111,6 +111,7 @@ PARSE_SYSTEM = """
 사용자의 자연어 입력을 아래 JSON 스키마로 변환하세요.
 
 {
+  "valid": true | false (부동산 매물 탐색과 무관한 입력이면 false),
   "location": "동 이름 (예: 명륜3가). 없으면 null",
   "infra": ["gym", "convenience_store", ...],
   "hard": {
@@ -149,6 +150,7 @@ infra 코드표 (반드시 아래 영어 코드만 사용):
     예) "헬스장 근처에" → 전부 제거
   · location·hard도 마찬가지로 연결 표현까지 제거
     예) "명륜3가 근처" → 전부 제거,  "보증금 500 이하" → 전부 제거
+- valid: 부동산 매물 탐색(방 구하기, 원룸/투룸/오피스텔 등 주거 관련)과 무관한 입력이면 false. 조건이 없더라도 부동산 탐색 의도가 있으면 true.
 - 반드시 JSON만 출력하고 설명은 쓰지 마세요.
 """
 
@@ -594,6 +596,9 @@ def search_stream(query: str, top_n: int = 3, seeker_id: int | None = None,
     yield (1, "running", "자연어 파싱 중...", None)
     try:
         parsed = parse_query(query)
+        if not parsed.get("valid", True):
+            yield (1, "error", "부동산 매물 탐색과 관련 없는 입력입니다.", None)
+            return
         parsed = apply_prefs(parsed, selected_prefs or [])
     except Exception as e:
         yield (1, "error", f"파싱 실패: {e}", None)
