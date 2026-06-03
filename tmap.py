@@ -72,21 +72,29 @@ def coord2address(api_key: str, lat: float, lng: float) -> str:
     return info.get("roadFullAddr") or info.get("fullAddress") or ""
 
 
-def search_places(api_key: str, keyword: str, lat: float, lng: float, radius: int = 500) -> list:
-    """키워드로 주변 장소 전체 검색 (페이지 자동 순회)."""
+def search_places(api_key: str, keyword: str, lat: float, lng: float,
+                  radius: int = 500, max_results: int | None = None) -> list:
+    """키워드로 주변 장소 검색. max_results 지정 시 해당 수만큼만 수집."""
     effective_radius_m = min(radius, _TMAP_MAX_RADIUS_M)
     effective_radius_km = max(1, math.ceil(effective_radius_m / 1000))
     results = []
     page = 1
 
     while True:
+        count = _TMAP_PAGE_SIZE
+        if max_results is not None:
+            remaining = max_results - len(results)
+            if remaining <= 0:
+                break
+            count = min(_TMAP_PAGE_SIZE, remaining)
+
         params = {
             "version":       1,
             "searchKeyword": keyword,
             "centerLon":     lng,
             "centerLat":     lat,
             "radius":        effective_radius_km,
-            "count":         _TMAP_PAGE_SIZE,
+            "count":         count,
             "page":          page,
             "resCoordType":  "WGS84GEO",
             "appKey":        api_key,
@@ -105,7 +113,6 @@ def search_places(api_key: str, keyword: str, lat: float, lng: float, radius: in
         elif not isinstance(pois, list):
             pois = []
 
-        # 각 POI에 중심점까지 거리(m) 계산하여 추가
         for poi in pois:
             try:
                 poi_lat = float(poi.get("noorLat") or 0)
@@ -118,7 +125,7 @@ def search_places(api_key: str, keyword: str, lat: float, lng: float, radius: in
         total = int(info.get("totalCount") or 0)
         print(f"  → 페이지 {page}: {len(pois)}개 수집 (총 {len(results)}개)")
 
-        if len(pois) < _TMAP_PAGE_SIZE or len(results) >= total:
+        if len(pois) < count or len(results) >= total:
             break
         page += 1
 

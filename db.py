@@ -1,5 +1,4 @@
 import os
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -27,15 +26,8 @@ INFRA_KR_TO_EN: dict[str, str] = {
 def get_connection():
     url = os.environ.get("POSTGRES_DB_URL")
     if url:
-        p = urlparse(url)
         import psycopg2
-        return psycopg2.connect(
-            host=p.hostname,
-            port=p.port or 5432,
-            dbname=p.path.lstrip("/"),
-            user=p.username,
-            password=p.password,
-        )
+        return psycopg2.connect(url)
 
     import psycopg2
     return psycopg2.connect(
@@ -56,10 +48,9 @@ def get_user_places_for_seeker(seeker_id: int) -> list[dict]:
         SELECT up.id, up.name, up.address, up.category,
                ST_Y(up.location::geometry) AS lat,
                ST_X(up.location::geometry) AS lng
-        FROM user_places up
-        JOIN seeker_user_places sup ON sup.userplace_id = up.id
-        WHERE sup.seeker_id = %s
-          AND sup.active = true;
+        FROM target_places up
+        JOIN registered_target_place sup ON sup.target_place_id = up.id
+        WHERE sup.seeker_id = %s;
     """, (seeker_id,))
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
@@ -99,9 +90,9 @@ def insert_infrastructures(places: list[dict], dong_name: str, keyword: str) -> 
     conn = get_connection()
     cur  = conn.cursor()
     execute_values(cur, """
-        INSERT INTO infrastructures (name, category, location, road_address, created_at, updated_at)
+        INSERT INTO infrastructures (name, category, location, address, created_at, updated_at)
         VALUES %s
-        ON CONFLICT (name, category) DO NOTHING;
+        ON CONFLICT ON CONSTRAINT uk_infrastructures_location DO NOTHING;
     """, [(r[0], r[1], r[2], r[3], now, now) for r in rows])
 
     inserted = cur.rowcount

@@ -12,11 +12,32 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from search import search_stream, explain_article
 
 app = FastAPI(title="Rooming AI 서버", version="1.0.0")
+
+
+@app.get("/health", tags=["헬스 체크"])
+@app.get("/", tags=["헬스 체크"])
+def health_check():
+    try:
+        from db import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        conn.close()
+        db_status = "ok"
+    except Exception as e:
+        db_status = f"error: {e}"
+
+    return JSONResponse({
+        "status": "ok",
+        "db": db_status,
+    })
 
 
 # ── 요청 스키마 ──────────────────────────────────────────────────

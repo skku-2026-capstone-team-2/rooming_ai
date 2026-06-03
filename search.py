@@ -115,7 +115,7 @@ PARSE_SYSTEM = """
   "location": "동 이름 (예: 명륜3가). 없으면 null",
   "infra": ["gym", "convenience_store", ...],
   "hard": {
-    "trade_type": "월세|전세|단기임대 중 하나. 명시 없으면 null",
+    "trade_type": "MONTHLY_RENT|DEPOSIT_BASIS 중 하나. 월세는 MONTHLY_RENT, 전세는 DEPOSIT_BASIS. 명시 없으면 null",
     "max_price": <보증금 최대, 만원 단위 정수. 없으면 null>,
     "min_price": <보증금 최소, 만원 단위 정수. 없으면 null>,
     "max_rent":  <월세 최대, 만원 단위 정수. 없으면 null>,
@@ -229,7 +229,7 @@ def filter_articles(parsed: dict) -> list[dict]:
                trade_type, deposit, monthly_rent, aream2 AS area_m2, floor_info,
                maintenance_fee, has3dmodel,
                description, tags, latitude AS lat, longitude AS lng
-        FROM property {where} LIMIT 500;
+        FROM properties {where} LIMIT 500;
     """
     conn = _get_conn()
     cur  = conn.cursor(cursor_factory=RealDictCursor)
@@ -271,7 +271,7 @@ def _fetch_and_save_infra(article: dict, keyword_en: str) -> tuple[int, str, flo
 
     keyword_kr = INFRA_EN_TO_KR.get(keyword_en, keyword_en)
     category   = keyword_en if keyword_en in INFRA_EN_TO_KR else "ETC"
-    docs = search_places(TMAP_API_KEY, keyword_kr, alat, alng, radius=1000)
+    docs = search_places(TMAP_API_KEY, keyword_kr, alat, alng, radius=1000, max_results=5)
     if not docs:
         return None
 
@@ -289,28 +289,31 @@ def _fetch_and_save_infra(article: dict, keyword_en: str) -> tuple[int, str, flo
         return None
 
     now  = datetime.now(timezone.utc)
-    conn = _get_conn()
-    cur  = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        INSERT INTO infrastructures (name, category, location, road_address, created_at, updated_at)
-        VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s, %s)
-        ON CONFLICT (name, category) DO UPDATE SET updated_at = EXCLUDED.updated_at
-        RETURNING id;
-    """, (place["이름"], category, plng, plat, place["도로명주소"], now, now))
-    row = cur.fetchone()
-    if not row:
-        cur.close(); conn.close()
-        return None
-    infra_id = row["id"]
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            INSERT INTO infrastructures (name, category, location, address, created_at, updated_at)
+            VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s, %s)
+            ON CONFLICT ON CONSTRAINT uk_infrastructures_location DO UPDATE SET updated_at = EXCLUDED.updated_at
+            RETURNING id;
+        """, (place["이름"], category, plng, plat, place["도로명주소"], now, now))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return None
+        infra_id = row["id"]
 
-    cur.execute("""
-        INSERT INTO infra_accessibility (property_id, infrastructure_id, walking_time)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (property_id, infrastructure_id) DO NOTHING;
-    """, (article["id"], infra_id, walking_min))
-    conn.commit()
-    cur.close()
-    conn.close()
+        cur.execute("""
+            INSERT INTO infra_accessibilities (property_id, infrastructure_id, walking_time)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (property_id, infrastructure_id) DO NOTHING;
+        """, (article["id"], infra_id, walking_min))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        return None
 
     return infra_id, place["이름"], walking_min
 
@@ -324,43 +327,46 @@ def score_infra(articles: list[dict], infra_keywords: list[str]) -> list[dict]:
     if not infra_keywords or not articles:
         return articles
 
-    from psycopg2.extras import RealDictCursor
-    conn = _get_conn()
-    cur  = conn.cursor(cursor_factory=RealDictCursor)
-    article_ids = [a["id"] for a in articles]
-    id_map      = {a["id"]: a for a in articles}
+    try:
+        from psycopg2.extras import RealDictCursor
+        conn = _get_conn()
+        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        article_ids = [a["id"] for a in articles]
+        id_map      = {a["id"]: a for a in articles}
 
-    for keyword in infra_keywords:
-        cur.execute("""
-            SELECT DISTINCT ON (ia.property_id)
-                ia.property_id  AS article_id,
-                ia.walking_time,
-                i.id            AS infra_id,
-                i.name          AS infra_name
-            FROM infra_accessibility ia
-            JOIN infrastructures i ON i.id = ia.infrastructure_id
-            WHERE ia.property_id = ANY(%s)
-              AND i.category = %s
-            ORDER BY ia.property_id, ia.walking_time;
-        """, (article_ids, keyword))
+        for keyword in infra_keywords:
+            cur.execute("""
+                SELECT DISTINCT ON (ia.property_id)
+                    ia.property_id  AS article_id,
+                    ia.walking_time,
+                    i.id            AS infra_id,
+                    i.name          AS infra_name
+                FROM infra_accessibilities ia
+                JOIN infrastructures i ON i.id = ia.infrastructure_id
+                WHERE ia.property_id = ANY(%s)
+                  AND i.category = %s
+                ORDER BY ia.property_id, ia.walking_time;
+            """, (article_ids, keyword))
 
-        found_ids = set()
-        for row in cur.fetchall():
-            aid = row["article_id"]
-            found_ids.add(aid)
-            _apply_infra_score(id_map[aid], keyword, row["infra_name"],
-                               row["infra_id"], float(row["walking_time"]))
+            found_ids = set()
+            for row in cur.fetchall():
+                aid = row["article_id"]
+                found_ids.add(aid)
+                _apply_infra_score(id_map[aid], keyword, row["infra_name"],
+                                   row["infra_id"], float(row["walking_time"]))
 
-        for aid in article_ids:
-            if aid in found_ids:
-                continue
-            result = _fetch_and_save_infra(id_map[aid], keyword)
-            if result:
-                infra_id, infra_name, walking_min = result
-                _apply_infra_score(id_map[aid], keyword, infra_name, infra_id, walking_min)
+            for aid in article_ids:
+                if aid in found_ids:
+                    continue
+                result = _fetch_and_save_infra(id_map[aid], keyword)
+                if result:
+                    infra_id, infra_name, walking_min = result
+                    _apply_infra_score(id_map[aid], keyword, infra_name, infra_id, walking_min)
 
-    cur.close()
-    conn.close()
+        cur.close()
+        conn.close()
+    except Exception:
+        return articles
 
     n = len(infra_keywords)
     for a in articles:
@@ -394,30 +400,33 @@ def score_embedding(articles: list[dict], soft_text: str, infra_keywords: list[s
     if not clean_query:
         return articles
 
-    from psycopg2.extras import RealDictCursor
-    q_vec = _embed([clean_query])[0]
-    q_str = "[" + ",".join(f"{x:.8f}" for x in q_vec.tolist()) + "]"
+    try:
+        from psycopg2.extras import RealDictCursor
+        q_vec = _embed([clean_query])[0]
+        q_str = "[" + ",".join(f"{x:.8f}" for x in q_vec.tolist()) + "]"
 
-    article_ids = [a["id"] for a in articles]
-    id_map      = {a["id"]: a for a in articles}
+        article_ids = [a["id"] for a in articles]
+        id_map      = {a["id"]: a for a in articles}
 
-    conn = _get_conn()
-    cur  = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT property_id,
-               1 - (embedding <=> %s::vector) AS cosine_sim
-        FROM property
-        WHERE property_id = ANY(%s)
-          AND embedding IS NOT NULL;
-    """, (q_str, article_ids))
+        conn = _get_conn()
+        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT property_id,
+                   1 - (embedding <=> %s::vector) AS cosine_sim
+            FROM properties
+            WHERE property_id = ANY(%s)
+              AND embedding IS NOT NULL;
+        """, (q_str, article_ids))
 
-    for row in cur.fetchall():
-        aid = row["property_id"]
-        if aid in id_map:
-            id_map[aid]["embed_score"] = (float(row["cosine_sim"]) + 1.0) / 2.0
+        for row in cur.fetchall():
+            aid = row["property_id"]
+            if aid in id_map:
+                id_map[aid]["embed_score"] = (float(row["cosine_sim"]) + 1.0) / 2.0
 
-    cur.close()
-    conn.close()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
     return articles
 
 
@@ -465,16 +474,19 @@ def _fetch_and_save_route(article: dict, user_place: dict) -> float | None:
     if dur is None:
         return None
 
-    conn = _get_conn()
-    cur  = conn.cursor()
-    cur.execute("""
-        INSERT INTO routes (property_id, userplace_id, duration_minutes, transport_mode, updated_at)
-        VALUES (%s, %s, %s, 'pedestrian', NOW())
-        ON CONFLICT (property_id, userplace_id) DO NOTHING;
-    """, (article["id"], user_place["id"], dur))
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO routes (property_id, target_place_id, duration_minutes, transport_mode, created_at, updated_at)
+            VALUES (%s, %s, %s, 'pedestrian', NOW(), NOW())
+            ON CONFLICT (property_id, target_place_id) DO NOTHING;
+        """, (article["id"], user_place["id"], dur))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
     return dur
 
 
@@ -490,49 +502,52 @@ def score_frequent(articles: list[dict], seeker_id: int) -> tuple[list[dict], li
     if not seeker_id or not articles:
         return articles, []
 
-    from db import get_user_places_for_seeker
-    from psycopg2.extras import RealDictCursor
+    try:
+        from db import get_user_places_for_seeker
+        from psycopg2.extras import RealDictCursor
 
-    user_places = get_user_places_for_seeker(seeker_id)
-    if not user_places:
+        user_places = get_user_places_for_seeker(seeker_id)
+        if not user_places:
+            return articles, []
+
+        article_ids   = [a["id"] for a in articles]
+        userplace_ids = [up["id"] for up in user_places]
+        id_map        = {a["id"]: a for a in articles}
+        up_map        = {up["id"]: up for up in user_places}
+
+        conn = _get_conn()
+        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT property_id, target_place_id, MIN(duration_minutes) AS duration_minutes
+            FROM routes
+            WHERE property_id = ANY(%s)
+              AND target_place_id = ANY(%s)
+            GROUP BY property_id, target_place_id;
+        """, (article_ids, userplace_ids))
+
+        found_pairs = set()
+        for row in cur.fetchall():
+            aid  = row["property_id"]
+            upid = row["target_place_id"]
+            found_pairs.add((aid, upid))
+            _apply_frequent_score(id_map[aid], up_map[upid]["name"], float(row["duration_minutes"]))
+
+        cur.close()
+        conn.close()
+
+        for aid in article_ids:
+            for upid in userplace_ids:
+                if (aid, upid) in found_pairs:
+                    continue
+                dur = _fetch_and_save_route(id_map[aid], up_map[upid])
+                if dur is not None:
+                    _apply_frequent_score(id_map[aid], up_map[upid]["name"], dur)
+
+        n = len(user_places)
+        for a in articles:
+            a["frequent_score"] /= n
+    except Exception:
         return articles, []
-
-    article_ids   = [a["id"] for a in articles]
-    userplace_ids = [up["id"] for up in user_places]
-    id_map        = {a["id"]: a for a in articles}
-    up_map        = {up["id"]: up for up in user_places}
-
-    conn = _get_conn()
-    cur  = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT property_id, userplace_id, MIN(duration_minutes) AS duration_minutes
-        FROM routes
-        WHERE property_id = ANY(%s)
-          AND userplace_id = ANY(%s)
-        GROUP BY property_id, userplace_id;
-    """, (article_ids, userplace_ids))
-
-    found_pairs = set()
-    for row in cur.fetchall():
-        aid  = row["property_id"]
-        upid = row["userplace_id"]
-        found_pairs.add((aid, upid))
-        _apply_frequent_score(id_map[aid], up_map[upid]["name"], float(row["duration_minutes"]))
-
-    cur.close()
-    conn.close()
-
-    for aid in article_ids:
-        for upid in userplace_ids:
-            if (aid, upid) in found_pairs:
-                continue
-            dur = _fetch_and_save_route(id_map[aid], up_map[upid])
-            if dur is not None:
-                _apply_frequent_score(id_map[aid], up_map[upid]["name"], dur)
-
-    n = len(user_places)
-    for a in articles:
-        a["frequent_score"] /= n
 
     return articles, [up["name"] for up in user_places]
 
@@ -542,10 +557,12 @@ def score_frequent(articles: list[dict], seeker_id: int) -> tuple[list[dict], li
 # ──────────────────────────────────────────────────────────────
 
 def explain_article(article: dict, query: str = "", frequent_places: list[str] | None = None) -> str:
+    _trade = {'MONTHLY_RENT': '월세', 'DEPOSIT_BASIS': '전세'}
+    _tt = article.get('trade_type', '')
     lines = [
         f"매물명: {article.get('title', '')}",
         f"위치: {article.get('address', '')}",
-        f"거래: {article.get('trade_type', '')} | 보증금 {article.get('deposit', '')}만원 | 월세 {article.get('monthly_rent', '')}만원",
+        f"거래: {_trade.get(_tt, _tt)} | 보증금 {article.get('deposit', '')}만원 | 월세 {article.get('monthly_rent', '')}만원",
         f"면적: {article.get('area_m2', '')}m² | 층: {article.get('floor_info', '')}",
     ]
     if article.get("description"):
@@ -606,7 +623,11 @@ def search_stream(query: str, top_n: int = 3, seeker_id: int | None = None,
     yield (1, "done", "파싱 완료", parsed)
 
     yield (2, "running", "매물 필터링 중...", None)
-    candidates = filter_articles(parsed)
+    try:
+        candidates = filter_articles(parsed)
+    except Exception as e:
+        yield (2, "error", f"DB 오류: {e}", None)
+        return
     if not candidates:
         yield (2, "error", "조건에 맞는 매물이 없습니다", None)
         return
