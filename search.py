@@ -150,7 +150,13 @@ infra 코드표 (반드시 아래 영어 코드만 사용):
     예) "헬스장 근처에" → 전부 제거
   · location·hard도 마찬가지로 연결 표현까지 제거
     예) "명륜3가 근처" → 전부 제거,  "보증금 500 이하" → 전부 제거
-- valid: 부동산 매물 탐색(방 구하기, 원룸/투룸/오피스텔 등 주거 관련)과 무관한 입력이면 false. 조건이 없더라도 부동산 탐색 의도가 있으면 true.
+- infra는 반드시 매물 외부의 인근 시설(편의점, 헬스장, 지하철역 등)만 해당합니다.
+  매물 내부 옵션(엘리베이터, 주차, 풀옵션, 신축, CCTV, 에어컨, 베란다, 반려동물 등)은
+  infra가 아니라 soft에 넣으세요.
+  예) "엘리베이터 있는 원룸" → infra=[], soft="엘리베이터 있는 원룸"
+  예) "주차가능 풀옵션" → infra=[], soft="주차가능 풀옵션"
+  예) "헬스장 가깝고 주차가능" → infra=["GYM"], soft="주차가능"
+- valid: 부동산 매물 탐색(방 구하기, 원룸/투룸/오피스텔 등 주거 관련, 주소 정보)과 무관한 입력이면 false. 조건이 없더라도 부동산 탐색 의도가 있으면 true.
 - 반드시 JSON만 출력하고 설명은 쓰지 마세요.
 """
 
@@ -203,16 +209,13 @@ def _price_filter(rows: list[dict], hard: dict) -> list[dict]:
     return [r for r in rows if passes(r)]
 
 
-def filter_articles(parsed: dict) -> list[dict]:
-    from psycopg2.extras import RealDictCursor
+# 좌표 거리 검색 반경 (역·랜드마크 등 주소 매칭 실패 시 폴백)
+LOCATION_RADIUS_M = 2000
 
-    hard     = parsed.get("hard", {}) or {}
-    location = parsed.get("location")
 
-    conditions, params = [], []
-    if location:
-        conditions.append("address ILIKE %s")
-        params.append(f"%{location}%")
+def _base_conditions(hard: dict) -> tuple[list[str], list]:
+    """location 외 공통 하드 조건(has3dmodel·trade_type·면적)."""
+    conditions, params = ["has3dmodel = true"], []
     if hard.get("trade_type"):
         conditions.append("trade_type = %s")
         params.append(hard["trade_type"])
@@ -222,22 +225,84 @@ def filter_articles(parsed: dict) -> list[dict]:
             op = ">=" if key.startswith("min") else "<="
             conditions.append(f"{col} {op} %s")
             params.append(val)
+    return conditions, params
 
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    sql = f"""
+
+_SELECT_COLS = """
         SELECT property_id AS id, title, address, room_type,
                trade_type, deposit, monthly_rent, aream2 AS area_m2, floor_info,
                maintenance_fee, has3dmodel,
                description, tags, latitude AS lat, longitude AS lng
-        FROM properties {where} LIMIT 500;
-    """
+        FROM properties
+"""
+
+
+def _run_query(conditions: list[str], params: list) -> list[dict]:
+    from psycopg2.extras import RealDictCursor
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     conn = _get_conn()
     cur  = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute(sql, params)
+    cur.execute(f"{_SELECT_COLS} {where} LIMIT 100;", params)
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
     conn.close()
-    return _price_filter(rows, hard)[:100]
+    return rows
+
+
+def _filter_by_distance(rows: list[dict], center: tuple[float, float]) -> list[dict]:
+    """매물을 center로부터 LOCATION_RADIUS_M 이내로 거르고 가까운 순 정렬."""
+    from tmap import _haversine
+    clat, clng = center
+    out = []
+    for r in rows:
+        if r.get("lat") is None or r.get("lng") is None:
+            continue
+        d = _haversine(clat, clng, float(r["lat"]), float(r["lng"]))
+        if d <= LOCATION_RADIUS_M:
+            r["_dist_m"] = d
+            out.append(r)
+    out.sort(key=lambda r: r["_dist_m"])
+    return out
+
+
+def filter_articles(parsed: dict) -> list[dict]:
+    import math
+
+    hard     = parsed.get("hard", {}) or {}
+    location = parsed.get("location")
+
+    conditions, params = _base_conditions(hard)
+
+    # 1) location 없음 → 공통 조건만으로 조회
+    if not location:
+        return _price_filter(_run_query(conditions, params), hard)[:50]
+
+    # 2) 동/행정구역 이름은 주소 매칭이 정확 — 먼저 시도
+    addr_rows = _run_query(conditions + ["address ILIKE %s"], params + [f"%{location}%"])
+    if addr_rows:
+        return _price_filter(addr_rows, hard)[:50]
+
+    # 3) 주소 매칭 0건(역·랜드마크 등) → Tmap 지오코딩 후 좌표 거리 필터
+    center = None
+    try:
+        from tmap import geocode_place
+        center = geocode_place(TMAP_API_KEY, location)
+    except Exception:
+        center = None
+    if not center:
+        return []
+
+    clat, clng = center
+    dlat = LOCATION_RADIUS_M / 111_000
+    dlng = LOCATION_RADIUS_M / (111_000 * math.cos(math.radians(clat)) or 1)
+    box = conditions + [
+        "latitude BETWEEN %s AND %s",
+        "longitude BETWEEN %s AND %s",
+    ]
+    box_params = params + [clat - dlat, clat + dlat, clng - dlng, clng + dlng]
+
+    rows = _filter_by_distance(_run_query(box, box_params), center)
+    return _price_filter(rows, hard)[:50]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -609,47 +674,70 @@ def explain_article(article: dict, query: str = "", frequent_places: list[str] |
 def search_stream(query: str, top_n: int = 3, seeker_id: int | None = None,
                   selected_prefs: list[str] | None = None):
     """Yields: (step, status, message, data)"""
+    import time
+    t0 = time.time()
+    def _log(step: str, msg: str):
+        print(f"[{time.time()-t0:5.1f}s] [{step}] {msg}", flush=True)
+
+    _log("START", f"query={query!r} top_n={top_n} seeker_id={seeker_id}")
 
     yield (1, "running", "자연어 파싱 중...", None)
+    _log("STEP1", "GPT 파싱 시작")
     try:
         parsed = parse_query(query)
         if not parsed.get("valid", True):
+            _log("STEP1", "비부동산 쿼리 거부")
             yield (1, "error", "부동산 매물 탐색과 관련 없는 입력입니다.", None)
             return
         parsed = apply_prefs(parsed, selected_prefs or [])
     except Exception as e:
+        _log("STEP1", f"실패: {e}")
         yield (1, "error", f"파싱 실패: {e}", None)
         return
+    _log("STEP1", f"완료 → location={parsed.get('location')} hard={parsed.get('hard')} infra={parsed.get('infra')}")
     yield (1, "done", "파싱 완료", parsed)
 
     yield (2, "running", "매물 필터링 중...", None)
+    _log("STEP2", "DB 필터링 시작")
     try:
         candidates = filter_articles(parsed)
     except Exception as e:
+        _log("STEP2", f"DB 오류: {e}")
         yield (2, "error", f"DB 오류: {e}", None)
         return
     if not candidates:
+        _log("STEP2", "결과 없음")
         yield (2, "error", "조건에 맞는 매물이 없습니다", None)
         return
+    candidate_ids = [c["id"] for c in candidates]
+    _log("STEP2", f"완료 → {len(candidates)}건: {candidate_ids}")
     yield (2, "done", f"{len(candidates)}건 필터링됨", {"count": len(candidates)})
 
     infra = parsed.get("infra", [])
     yield (4, "running", "인프라 근접 점수 계산 중...", None)
+    _log("STEP4", f"인프라 점수 시작 → keywords={infra} 매물={len(candidates)}건")
     candidates = score_infra(candidates, infra)
+    _log("STEP4", "완료")
     yield (4, "done", "완료", None)
 
     frequent_names: list[str] = []
     if seeker_id:
         yield (5, "running", "자주 가는 장소 점수 계산 중...", None)
+        _log("STEP5", f"자주 가는 장소 점수 시작 → seeker_id={seeker_id}")
         candidates, frequent_names = score_frequent(candidates, seeker_id)
+        _log("STEP5", f"완료 → places={frequent_names}")
         yield (5, "done", "완료", {"frequent_names": frequent_names})
 
     soft_text = parsed.get("soft", "")
-    print(f"  [임베딩 쿼리] {soft_text!r}")
     yield (6, "running", "임베딩 유사도 계산 중...", None)
+    _log("STEP6", f"임베딩 시작 → query={soft_text!r}")
     candidates = score_embedding(candidates, soft_text, infra)
+    _log("STEP6", "완료")
     yield (6, "done", "완료", None)
 
     yield (7, "running", "최종 랭킹 중...", None)
+    _log("STEP7", "랭킹 시작")
     results = rank_and_pick(candidates, top_n)
+    _log("STEP7", f"완료 → TOP {len(results)}: {[r['id'] for r in results]}")
+    _log("END", f"총 소요 {time.time()-t0:.1f}s")
     yield (7, "done", f"TOP {len(results)} 선정", results)

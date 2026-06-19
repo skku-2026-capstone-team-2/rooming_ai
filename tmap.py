@@ -132,6 +132,45 @@ def search_places(api_key: str, keyword: str, lat: float, lng: float,
     return results
 
 
+def geocode_place(api_key: str, keyword: str) -> tuple[float, float] | None:
+    """장소 이름(역·랜드마크·동 등) → (위도, 경도). 전국 검색(radius=0). 실패 시 None."""
+    if not keyword:
+        return None
+    try:
+        resp = requests.get(
+            TMAP_POI_URL,
+            params={
+                "version":       1,
+                "searchKeyword": keyword,
+                "centerLon":     127.0,
+                "centerLat":     37.5,
+                "radius":        0,        # 0 = 반경 제한 없음 (전국)
+                "count":         1,
+                "page":          1,
+                "resCoordType":  "WGS84GEO",
+                "searchType":    "all",
+                "appKey":        api_key,
+            },
+            headers={"Accept": "application/json"},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return None
+        pois = resp.json().get("searchPoiInfo", {}).get("pois", {}).get("poi", [])
+        if isinstance(pois, dict):
+            pois = [pois]
+        if not pois:
+            return None
+        poi = pois[0]
+        lat = float(poi.get("noorLat") or 0)
+        lng = float(poi.get("noorLon") or 0)
+        if not lat or not lng:
+            return None
+        return lat, lng
+    except Exception:
+        return None
+
+
 TMAP_PEDESTRIAN_URL = "https://apis.openapi.sk.com/tmap/routes/pedestrian"
 
 
